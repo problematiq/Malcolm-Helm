@@ -1295,6 +1295,50 @@ arkime_offline:
   extraVolumes: []
   extraVolumeMounts: []
 
+# Arkime Cont3xt (https://arkime.com/cont3xt): gathers context about indicators (IPs,
+#   domains, URLs, hashes, ...) from configured integrations. Integration API keys are
+#   set per user on Cont3xt's Settings page. When enabled it's served at /cont3xt/.
+#
+# Arkime Parliament (https://arkime.com/parliament): monitors the health and status of
+#   Arkime clusters. When enabled it's served at /parliament/.
+#
+# Both run from the Malcolm Arkime image (with ARKIME_CONT3XT / ARKIME_PARLIAMENT set),
+#   share Arkime's users database and are put behind Malcolm authentication by the
+#   nginx-proxy, which enables the routes from CONT3XT_DISABLED / PARLIAMENT_DISABLED in
+#   the arkime-env ConfigMap.
+# NOTE: this requires Malcolm Arkime and nginx-proxy images that include Cont3xt and
+#   Parliament support (added after Malcolm v26.10.0). With older images, set `image`
+#   below and image.nginx_container_override to builds that include it.
+#   The `cont3xt` and `parliament` Services are always created, even when disabled,
+#   because nginx-proxy images with this support declare both upstreams unconditionally
+#   and won't start if those names don't resolve.
+cont3xt:
+  enabled: false
+  # Image override; defaults to the Arkime image (image.arkime_container_override, or
+  #   <image.repository>/arkime:<appVersion>).
+  image: ""
+  # Upstream Malcolm suggests requests of cpu: "0.5", memory: "512Mi".
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  # Extra Kubernetes EnvVar / Volume / VolumeMount entries for the Cont3xt container.
+  extraEnv: []
+  extraVolumes: []
+  extraVolumeMounts: []
+
+parliament:
+  enabled: false
+  # Image override; defaults to the Arkime image (see cont3xt.image).
+  image: ""
+  # Upstream Malcolm suggests requests of cpu: "0.25", memory: "256Mi".
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  # Extra Kubernetes EnvVar / Volume / VolumeMount entries for the Parliament container.
+  extraEnv: []
+  extraVolumes: []
+  extraVolumeMounts: []
+
 pcap_live:
   enabled: false
 

@@ -25,6 +25,10 @@ data:
   MANAGE_PCAP_FILES: "{{ .Values.arkime_env.manage_pcap_files }}"
   ARKIME_PCAP_LIBPCAP: "{{ .Values.arkime_env.pcap_libpcap }}"
   ARKIME_DEBUG_LEVEL: "{{ .Values.arkime_env.arkime_debug_level }}"
+  # Arkime Cont3xt and Parliament (31-arkime-cont3xt-parliament.yml). Read by nginx-proxy
+  #   to expose /cont3xt and /parliament, and by those containers' service checks.
+  CONT3XT_DISABLED: "{{ not .Values.cont3xt.enabled }}"
+  PARLIAMENT_DISABLED: "{{ not .Values.parliament.enabled }}"
 {{- if ne .Values.siem_env.malcolm_network_index_pattern "arkime_sessions3-*" }}
   # Always query all indices instead of trying to calculate which ones
   #   https://arkime.com/settings#queryAllIndices

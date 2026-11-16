@@ -15,6 +15,7 @@ For more information on Malcolm and its features, see:
     - [Pre-generating Secrets](#PreGeneratingSecrets)
     - [MaxMind GeoIP Databases](#MaxMind)
     - [Arkime Extra Environment Variables and Volumes](#ArkimeExtras)
+    - [Arkime Cont3xt and Parliament](#ArkimeApps)
 * [Demonstration Using Vagrant](#VagrantDemo)
     - [Vagrant Quickstart (without Istio)](#VagrantQuickstart)
     - [Vagrant Quickstart (with Istio)](#VagrantQuickstartIstio)
@@ -234,6 +235,34 @@ arkime_env:
       mountPath: /opt/arkime/etc/my-wise-data
       readOnly: true
 ```
+
+### <a name="ArkimeApps"></a>Arkime Cont3xt and Parliament
+
+The chart can also deploy two more Arkime tools. Both are off by default:
+
+* [Cont3xt](https://arkime.com/cont3xt) gathers context about indicators (IPs, domains, URLs, hashes, ...) from configured integrations. Each user sets their own integration API keys on the Cont3xt **Settings** page. It's served at `https://<malcolm>/cont3xt/`.
+* [Parliament](https://arkime.com/parliament) monitors the health and status of Arkime clusters. It's served at `https://<malcolm>/parliament/`.
+
+```yaml
+cont3xt:
+  enabled: true
+parliament:
+  enabled: true
+```
+
+Each runs as its own Deployment from the Malcolm Arkime image, which starts `cont3xt.js` or `parliament.js` instead of capture, viewer and WISE. At startup they generate their configuration so that they:
+
+* share Arkime's users database in OpenSearch, and its `passwordSecret` from `arkime-secret-env`
+* sit behind Malcolm authentication through nginx-proxy, using header auth
+* give their admin functions to users with `auth.role_admin` or `auth.role_arkime_admin`
+
+Each one waits until the main Arkime container has initialized the users index. Turning an app on sets `CONT3XT_DISABLED` or `PARLIAMENT_DISABLED` to `false` in the `arkime-env` ConfigMap. That's what makes nginx-proxy expose the route, and for Cont3xt it also adds a card to the landing page.
+
+Each section also accepts `image`, `resources`, `nodeSelector`, `tolerations`, `extraEnv`, `extraVolumes` and `extraVolumeMounts`. `image` defaults to the Arkime image.
+
+> **Image requirement:** Cont3xt and Parliament support was added to the Malcolm Arkime and nginx-proxy images after Malcolm v26.10.0. If you're on an older chart `appVersion`, point `cont3xt.image`, `parliament.image` (or `image.arkime_container_override`) and `image.nginx_container_override` at images built with that support.
+
+The `cont3xt` and `parliament` Services are always created, even when the apps are disabled. nginx-proxy images with this support always declare both upstreams, and nginx won't start if their hostnames don't resolve.
 
 ## <a name="VagrantDemo"></a>Demonstration Using Vagrant
 
