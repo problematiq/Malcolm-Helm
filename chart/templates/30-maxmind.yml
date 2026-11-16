@@ -1,0 +1,98 @@
+{{/*
+  MaxMind GeoIP database updater.
+
+  When maxmind.enabled is true, a single `geoipupdate` container keeps the MaxMind
+  GeoLite2 databases current in a shared ReadWriteMany volume. The Arkime containers
+  (07-arkime.yml, 23-arkime-live.yml) mount that volume read-only and are pointed at it,
+  so the databases are downloaded once per cluster rather than once per Arkime pod.
+  The account ID and license key are read from the `arkime-secret-env` Secret written by
+  the secret-init hook Job (00-secret-init.yml).
+*/}}
+{{- if .Values.maxmind.enabled }}
+{{- if not .Values.maxmind.storage.existingClaim }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: maxmind-claim
+spec:
+  {{- with (default .Values.storage_class_name .Values.maxmind.storage.classNameOverride) }}
+  storageClassName: {{ . }}
+  {{- end }}
+  accessModes:
+    - ReadWriteMany
+  volumeMode: Filesystem
+  resources:
+    requests:
+      storage: {{ .Values.maxmind.storage.size }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: maxmind-deployment
+spec:
+  selector:
+    matchLabels:
+      name: maxmind-deployment
+  replicas: 1
+  # Only one writer should ever own the database directory.
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        name: maxmind-deployment
+    spec:
+      {{- with .Values.maxmind.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.maxmind.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.maxmind.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: maxmind-container
+          image: "{{ .Values.maxmind.image }}"
+          imagePullPolicy: "{{ .Values.maxmind.pullPolicy | default .Values.image.pullPolicy }}"
+          {{- with .Values.maxmind.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            - name: GEOIPUPDATE_ACCOUNT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: arkime-secret-env
+                  key: MAXMIND_GEOIP_DB_ACCOUNT_ID
+            - name: GEOIPUPDATE_LICENSE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: arkime-secret-env
+                  key: MAXMIND_GEOIP_DB_LICENSE_KEY
+            - name: GEOIPUPDATE_EDITION_IDS
+              value: {{ .Values.maxmind.edition_ids | quote }}
+            - name: GEOIPUPDATE_FREQUENCY
+              value: {{ .Values.maxmind.frequency | quote }}
+            - name: GEOIPUPDATE_DB_DIR
+              value: /usr/share/GeoIP
+            {{- with .Values.maxmind.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.maxmind.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: maxmind-volume
+              mountPath: /usr/share/GeoIP
+      volumes:
+        - name: maxmind-volume
+          persistentVolumeClaim:
+            claimName: {{ .Values.maxmind.storage.existingClaim | default "maxmind-claim" }}
+{{- end }}

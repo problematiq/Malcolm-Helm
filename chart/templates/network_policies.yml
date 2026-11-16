@@ -158,4 +158,30 @@ spec:
   - ports:
     - protocol: TCP
       port: 443
+{{- if .Values.maxmind.enabled }}
+
+---
+{{/*
+Allow the MaxMind geoipupdate pod to reach the MaxMind download servers over HTTPS
+(external egress is otherwise blocked by allow-internal-block-external).
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: maxmind-geoipupdate-egress
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      name: maxmind-deployment
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+      - ipBlock:
+          cidr: 0.0.0.0/0
+      ports:
+      - protocol: TCP
+        port: 443
+{{- end }}
 {{ end }}
