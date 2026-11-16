@@ -11,6 +11,11 @@ For more information on Malcolm and its features, see:
 ### <a name="TableOfContents"></a>Table of Contents
 
 * [Installation From Helm Repository](#HelmRepoQuickstart)
+    - [Generated Secrets](#GeneratedSecrets)
+    - [Pre-generating Secrets](#PreGeneratingSecrets)
+    - [MaxMind GeoIP Databases](#MaxMind)
+    - [Arkime Extra Environment Variables and Volumes](#ArkimeExtras)
+    - [Arkime Cont3xt and Parliament](#ArkimeApps)
 * [Demonstration Using Vagrant](#VagrantDemo)
     - [Vagrant Quickstart (without Istio)](#VagrantQuickstart)
     - [Vagrant Quickstart (with Istio)](#VagrantQuickstartIstio)
@@ -90,6 +95,174 @@ STATUS: deployed
 REVISION: 1
 TEST SUITE: None
 ```
+
+### <a name="GeneratedSecrets"></a>Generated Secrets
+
+Malcolm's internal service passwords and tokens are not templated by Helm. A `pre-install`/`pre-upgrade` hook Job ([`chart/templates/00-secret-init.yml`](chart/templates/00-secret-init.yml)) generates each one **once** and writes it to a Secret in the release namespace. On every later install or upgrade the Job keeps any value already present and only refreshes the non-secret fields from `values.yaml`. Values therefore stay stable across upgrades and GitOps reconciles, and stay consistent with data that was initialized with them (the Postgres database, NetBox, and the Arkime password hash).
+
+These Secrets are persistent:
+
+* They are labeled `app.kubernetes.io/managed-by=malcolm-secret-init` and annotated with `helm.sh/resource-policy: keep` and `argocd.argoproj.io/sync-options: Prune=false,Delete=false`. Neither Helm nor Argo CD deletes them, and that includes `helm uninstall`. A reinstall into the same namespace reuses the same passwords, so it can reattach to existing persistent volumes.
+* If the Job can't read an existing Secret (for example, the API server is unreachable or RBAC denies the read), it fails and the hook is retried. It never treats a failed read as "missing" and generates a replacement value.
+
+To start over with freshly generated values (for example, after deleting the persistent volumes too), delete the Secrets explicitly:
+
+```bash
+kubectl -n $MALCOLM_NAMESPACE delete secret -l app.kubernetes.io/managed-by=malcolm-secret-init
+```
+
+| Secret | Key(s) | Contents | `values.yaml` override (takes precedence) |
+|---|---|---|---|
+| `valkey-env` | `VALKEY_PASSWORD` | Valkey AUTH password (also copied into `netbox-secret-env`) | — |
+| `valkey-remotesensor-env` | `VALKEY_PASSWORD` | Valkey password for remote sensors | — |
+| `netbox-secret-env` | `SECRET_KEY` | NetBox Django secret key (at least 50 characters) | — |
+| `netbox-secret-env` | `SUPERUSER_PASSWORD` | NetBox `admin` user password | — |
+| `netbox-secret-env` | `SUPERUSER_API_TOKEN` | NetBox `admin` API token (v1 token, 40 characters) | — |
+| `postgres-env` | `POSTGRES_PASSWORD` | Postgres password (also used for the NetBox and Keycloak DB users) | `postgres.password` |
+| `arkime-secret-env` | `ARKIME_PASSWORD_SECRET` | Arkime viewer [`passwordSecret`](https://arkime.com/settings#passwordSecret) | `auth.arkime_password` |
+| `arkime-secret-env` | `ARKIME_WISE_CONFIG_PIN_CODE` | Arkime WISE GUI configuration PIN | `auth.arkime_wise_pin` |
+| `arkime-secret-env` | `MAXMIND_GEOIP_DB_ACCOUNT_ID`, `MAXMIND_GEOIP_DB_LICENSE_KEY` | MaxMind credentials (user-supplied, never generated) | `maxmind.account_id`, `maxmind.license_key` |
+| `filescan-secret-env` | `FILESCAN_HTTP_SERVER_KEY` | Extracted-file HTTP server encryption password | `filescan_env.extracted_file_http_server_encrypt_password` |
+| `nginx-session-env` | `NGINX_SESSION_SECRET` | nginx OIDC session signing secret (Keycloak auth modes only; 64 hex characters) | `keycloak.nginx_session_secret` |
+
+Read back any generated value with, for example:
+
+```bash
+kubectl -n $MALCOLM_NAMESPACE get secret netbox-secret-env -o jsonpath='{.data.SUPERUSER_API_TOKEN}' | base64 -d
+```
+
+### <a name="PreGeneratingSecrets"></a>Pre-generating Secrets
+
+Because the Job keeps any value already present, you can supply your own passwords and API tokens by creating the Secrets **before** running `helm install`. This lets you:
+
+* know the NetBox API token ahead of time and hand it to other systems
+* keep secrets out of `values.yaml` and Git
+* manage the Secrets with an external tool such as Sealed Secrets, External Secrets, or SOPS
+* reuse the passwords of an existing deployment's databases
+
+You only need to provide the keys you care about. The Job generates any key you leave out and adds the remaining non-secret keys itself. A `values.yaml` override from the table above, if set, still takes precedence over a pre-created value, so leave those overrides empty when you pre-create the Secret.
+
+```bash
+export MALCOLM_NAMESPACE=malcolm
+kubectl create namespace $MALCOLM_NAMESPACE
+
+# Same generator the hook Job uses: N random characters from the given charset (default A-Za-z0-9)
+gen() { LC_ALL=C tr -dc "${2:-A-Za-z0-9}" < /dev/urandom | head -c "$1"; }
+
+# Valkey (the Job copies this password into netbox-secret-env as well)
+kubectl -n $MALCOLM_NAMESPACE create secret generic valkey-env \
+    --from-literal=VALKEY_PASSWORD="$(gen 25)"
+kubectl -n $MALCOLM_NAMESPACE create secret generic valkey-remotesensor-env \
+    --from-literal=VALKEY_PASSWORD="$(gen 25)"
+
+# NetBox: Django secret key, admin password and admin API token
+kubectl -n $MALCOLM_NAMESPACE create secret generic netbox-secret-env \
+    --from-literal=SECRET_KEY="$(gen 50)" \
+    --from-literal=SUPERUSER_PASSWORD="$(gen 25)" \
+    --from-literal=SUPERUSER_API_TOKEN="$(gen 40)"
+
+# Postgres (shared by the NetBox and Keycloak database users)
+kubectl -n $MALCOLM_NAMESPACE create secret generic postgres-env \
+    --from-literal=POSTGRES_PASSWORD="$(gen 32)"
+
+# Arkime cluster password secret, WISE GUI PIN and (optionally) MaxMind credentials
+kubectl -n $MALCOLM_NAMESPACE create secret generic arkime-secret-env \
+    --from-literal=ARKIME_PASSWORD_SECRET="$(gen 32)" \
+    --from-literal=ARKIME_WISE_CONFIG_PIN_CODE="$(gen 8 'a-z0-9')" \
+    --from-literal=MAXMIND_GEOIP_DB_ACCOUNT_ID="123456" \
+    --from-literal=MAXMIND_GEOIP_DB_LICENSE_KEY="your-maxmind-license-key"
+
+# Extracted-file HTTP server encryption password
+kubectl -n $MALCOLM_NAMESPACE create secret generic filescan-secret-env \
+    --from-literal=FILESCAN_HTTP_SERVER_KEY="$(gen 14)"
+
+# Only for auth.mode=keycloak or keycloak_remote
+kubectl -n $MALCOLM_NAMESPACE create secret generic nginx-session-env \
+    --from-literal=NGINX_SESSION_SECRET="$(openssl rand -hex 32)"
+```
+
+Notes:
+
+* Pre-generated values are only picked up if the Secret exists **before** the hook Job first runs. After a value has been generated and used to initialize a database (Postgres, NetBox), changing it in the Secret won't change the password inside that database.
+* `SUPERUSER_API_TOKEN` is created in NetBox as a v1 token and should be 40 characters long. Send it to the NetBox API as `Authorization: Token <token>`.
+* If you're using a GitOps tool, create these Secrets in a sync wave (or a separate Application) that runs before the Malcolm chart's PreSync hooks.
+* Tokens for **external** services, such as `netbox.netbox_remote_token` and `logstash.otkb.token`, aren't generated. They're always taken from `values.yaml`.
+
+### <a name="MaxMind"></a>MaxMind GeoIP Databases
+
+By default, each Arkime container downloads the MaxMind GeoLite2 databases itself at startup, using the credentials in `maxmind.account_id`/`maxmind.license_key` or `maxmind.alternate_url`. To download them once per cluster instead, set `maxmind.enabled: true`. The chart then deploys:
+
+* a `maxmind-deployment` running MaxMind's official [`geoipupdate`](https://github.com/maxmind/geoipupdate/blob/main/doc/docker.md) container, which refreshes the databases every `maxmind.frequency` hours
+* a `ReadWriteMany` PersistentVolumeClaim, `maxmind-claim` (or the claim named in `maxmind.storage.existingClaim`), that holds the databases
+
+Every Arkime container (the offline `arkime-deployment` and the `arkime-live-daemonset`) mounts that volume read-only at `maxmind.arkime_mount_path`. Arkime's `geoLite2ASN` and `geoLite2Country` settings are pointed at it through `ARKIME__<setting>` environment variables, which require Arkime 5.6 or later. The per-pod startup download is turned off.
+
+```yaml
+maxmind:
+  enabled: true
+  account_id: "123456"          # or pre-create arkime-secret-env, see above
+  license_key: "xxxxxxxxxxxx"
+  edition_ids: "GeoLite2-ASN GeoLite2-Country GeoLite2-City"
+  frequency: "72"
+  storage:
+    size: 1Gi
+    classNameOverride: ""       # must support ReadWriteMany; defaults to storage_class_name
+```
+
+`maxmind.enabled` requires a MaxMind account ID and license key, because `maxmind.alternate_url` only applies to Arkime's own per-pod download. When `enable_network_policies` is true, the chart also adds a NetworkPolicy that allows the updater egress on TCP 443.
+
+### <a name="ArkimeExtras"></a>Arkime Extra Environment Variables and Volumes
+
+You can add standard Kubernetes `EnvVar`, `Volume` and `VolumeMount` entries to the Arkime containers:
+
+* `arkime_env.extraEnv` / `extraVolumes` / `extraVolumeMounts` apply to every Arkime container, both offline and live.
+* `arkime_offline.*` applies only to the offline/upload `arkime-deployment`.
+* `arkime_live.*` applies only to the live-capture `arkime-live-daemonset`.
+
+The shared entries come first, followed by the per-workload ones. `extraEnv` entries are placed after the variables the chart sets, so an entry with the same name overrides the chart's value. Since Arkime reads any `config.ini` setting from `ARKIME__<setting>` (for the `[default]` section) or `ARKIME_<section>__<setting>` environment variables, `extraEnv` is also an easy way to tune Arkime settings that the chart doesn't expose.
+
+```yaml
+arkime_env:
+  extraEnv:
+    - name: ARKIME__maxFileSizeG
+      value: "8"
+  extraVolumes:
+    - name: my-wise-data
+      configMap:
+        name: my-wise-data
+  extraVolumeMounts:
+    - name: my-wise-data
+      mountPath: /opt/arkime/etc/my-wise-data
+      readOnly: true
+```
+
+### <a name="ArkimeApps"></a>Arkime Cont3xt and Parliament
+
+The chart can also deploy two more Arkime tools. Both are off by default:
+
+* [Cont3xt](https://arkime.com/cont3xt) gathers context about indicators (IPs, domains, URLs, hashes, ...) from configured integrations. Each user sets their own integration API keys on the Cont3xt **Settings** page. It's served at `https://<malcolm>/cont3xt/`.
+* [Parliament](https://arkime.com/parliament) monitors the health and status of Arkime clusters. It's served at `https://<malcolm>/parliament/`.
+
+```yaml
+cont3xt:
+  enabled: true
+parliament:
+  enabled: true
+```
+
+Each runs as its own Deployment from the Malcolm Arkime image, which starts `cont3xt.js` or `parliament.js` instead of capture, viewer and WISE. At startup they generate their configuration so that they:
+
+* share Arkime's users database in OpenSearch, and its `passwordSecret` from `arkime-secret-env`
+* sit behind Malcolm authentication through nginx-proxy, using header auth
+* give their admin functions to users with `auth.role_admin` or `auth.role_arkime_admin`
+
+Each one waits until the main Arkime container has initialized the users index. Turning an app on sets `CONT3XT_DISABLED` or `PARLIAMENT_DISABLED` to `false` in the `arkime-env` ConfigMap. That's what makes nginx-proxy expose the route, and for Cont3xt it also adds a card to the landing page.
+
+Each section also accepts `image`, `resources`, `nodeSelector`, `tolerations`, `extraEnv`, `extraVolumes` and `extraVolumeMounts`. `image` defaults to the Arkime image.
+
+> **Image requirement:** Cont3xt and Parliament support was added to the Malcolm Arkime and nginx-proxy images after Malcolm v26.10.0. If you're on an older chart `appVersion`, point `cont3xt.image`, `parliament.image` (or `image.arkime_container_override`) and `image.nginx_container_override` at images built with that support.
+
+The `cont3xt` and `parliament` Services are always created, even when the apps are disabled. nginx-proxy images with this support always declare both upstreams, and nginx won't start if their hostnames don't resolve.
 
 ## <a name="VagrantDemo"></a>Demonstration Using Vagrant
 

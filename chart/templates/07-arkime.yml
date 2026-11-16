@@ -34,9 +34,17 @@ spec:
       {{ include "malcolm.arkime.container" (dict
            "root" $
            "name" "arkime-container"
+           "workload" "arkime_offline"
            "ports" (list (dict "name" "http" "protocol" "TCP" "containerPort" 8005))
            "securityContext" (dict
              "capabilities" (dict "add" (list "IPC_LOCK" "SYS_RESOURCE"))
+           )
+           "env" (list
+             (dict "name" "MALCOLM_USERNAME" "valueFrom" (dict "secretKeyRef" (dict
+               "name" (.Values.auth.existingSecret | default "auth-env")
+               "key" (ternary .Values.auth.usernameKey "MALCOLM_USERNAME" (not (empty .Values.auth.existingSecret)))
+             )))
+             (dict "name" "PCAP_NODE_NAME" "valueFrom" (dict "fieldRef" (dict "fieldPath" "spec.nodeName")))
            )
            "envFrom" (list
              (dict "configMapRef" (dict "name" "process-env"))
@@ -64,16 +72,6 @@ spec:
              )
            )
          ) | nindent 6 }}
-        env:
-          - name: MALCOLM_USERNAME
-            valueFrom:
-              secretKeyRef:
-                name: {{ .Values.auth.existingSecret | default "auth-env" }}
-                key: "{{ if .Values.auth.existingSecret }}{{ .Values.auth.usernameKey }}{{ else }}MALCOLM_USERNAME{{ end }}"
-          - name: PCAP_NODE_NAME
-            valueFrom:
-              fieldRef:
-                fieldPath: spec.nodeName
       initContainers:
       {{ include "malcolm.dirinit.initContainer" (dict
            "root" $
@@ -112,3 +110,4 @@ spec:
           secret:
             secretName: {{ .Values.external_elasticsearch.elastic_cert_name }}
 {{- end }}
+{{- with (include "malcolm.arkime.extraVolumes" (dict "root" $ "workload" "arkime_offline")) }}{{ . | nindent 8 }}{{- end }}

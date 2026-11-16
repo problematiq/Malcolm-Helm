@@ -1106,9 +1106,45 @@ zeek_env:
 maxmind:
   # MaxMind GeoIP database update API key (see
   #   https://support.maxmind.com/hc/en-us/articles/4407116112539-Using-License-Keys)
+  # These are stored in the `arkime-secret-env` Secret by the secret-init Job.
   account_id: ""
   license_key: ""
+  # Alternate download URL for MaxMind MMDB tarballs. Only used by Arkime's own
+  #   startup download, i.e. when `maxmind.enabled` is false.
   alternate_url: ""
+
+  # When enabled, a single MaxMind `geoipupdate` Deployment downloads the GeoIP
+  #   databases into a shared ReadWriteMany volume, and every Arkime container
+  #   (offline and live) mounts that volume read-only and is pointed at it, instead
+  #   of each Arkime pod downloading its own copy at startup.
+  #   Requires `account_id` and `license_key` above.
+  enabled: false
+  image: ghcr.io/maxmind/geoipupdate:v7.1.0
+  # Defaults to image.pullPolicy if left empty.
+  pullPolicy: ""
+  # Space-separated list of MaxMind database edition IDs to download.
+  edition_ids: "GeoLite2-ASN GeoLite2-Country GeoLite2-City"
+  # How often (in hours) geoipupdate checks for new databases. Must be > 0 so the
+  #   container keeps running instead of exiting after one download.
+  frequency: "72"
+  # Path at which the shared GeoIP volume is mounted (read-only) in the Arkime
+  #   containers. Arkime's geoLite2ASN/geoLite2Country settings are overridden
+  #   (via ARKIME__ environment variables, Arkime >= 5.6) to point here.
+  arkime_mount_path: /opt/arkime/etc/maxmind
+  # Extra environment variables for the geoipupdate container, e.g. GEOIPUPDATE_HOST
+  #   or GEOIPUPDATE_PROXY (see https://github.com/maxmind/geoipupdate/blob/main/doc/docker.md)
+  extraEnv: []
+  resources: {}
+  securityContext: {}
+  podSecurityContext: {}
+  nodeSelector: {}
+  tolerations: []
+  storage:
+    # Use an existing ReadWriteMany PersistentVolumeClaim instead of creating `maxmind-claim`.
+    existingClaim: ""
+    size: 1Gi
+    # Optional override for the storage provisioner class (defaults to `storage_class_name`)
+    classNameOverride: ""
 
 # Configuration for Arkime, affecting both live and offline deployments
 arkime_env:
@@ -1120,6 +1156,28 @@ arkime_env:
   manage_pcap_files: "true"
   # Revert to older libpcap mode for PCAP file processing rather than faster scheme processing
   pcap_libpcap: "false"
+
+  # Extra environment variables, volumes and volume mounts for all Arkime containers.
+  #   Standard Kubernetes EnvVar / Volume / VolumeMount objects. Entries in
+  #   `arkime_env` apply to every Arkime container (offline and live) and come
+  #   first; the per-workload ones in `arkime_offline` / `arkime_live` follow.
+  #   extraEnv entries are appended last, so they override chart-set env vars.
+  #   Arkime >= 5.6 also reads any config.ini setting from ARKIME__<setting>
+  #   ([default] section) or ARKIME_<section>__<setting> env vars.
+  # extraEnv:
+  #   - name: ARKIME__maxFileSizeG
+  #     value: "8"
+  # extraVolumes:
+  #   - name: my-wise-data
+  #     configMap:
+  #       name: my-wise-data
+  # extraVolumeMounts:
+  #   - name: my-wise-data
+  #     mountPath: /opt/arkime/etc/my-wise-data
+  #     readOnly: true
+  extraEnv: []
+  extraVolumes: []
+  extraVolumeMounts: []
 
   development:
     free_space_g: "10%"
@@ -1212,6 +1270,12 @@ arkime_live:
   nodeSelector:
     cnaps.io/arkime-capture: "true"
 
+  # Extra environment variables, volumes and volume mounts for the live-capture Arkime DaemonSet (arkime-live-container) only
+  #   (appended after the `arkime_env` ones; see the comment there).
+  extraEnv: []
+  extraVolumes: []
+  extraVolumeMounts: []
+
 # Configuration for Arkime's processing of uploaded/imported PCAP files
 arkime_offline:
   # Whether or not Arkime should analyze uploaded PCAP files
@@ -1224,6 +1288,56 @@ arkime_offline:
   expose_wise_gui: "true"
   # Controls whether the WISE configuration GUI is read-only (false) or editable (true)
   allow_wise_gui_config: "false"
+
+  # Extra environment variables, volumes and volume mounts for the offline/upload Arkime Deployment (arkime-container) only
+  #   (appended after the `arkime_env` ones; see the comment there).
+  extraEnv: []
+  extraVolumes: []
+  extraVolumeMounts: []
+
+# Arkime Cont3xt (https://arkime.com/cont3xt): gathers context about indicators (IPs,
+#   domains, URLs, hashes, ...) from configured integrations. Integration API keys are
+#   set per user on Cont3xt's Settings page. When enabled it's served at /cont3xt/.
+#
+# Arkime Parliament (https://arkime.com/parliament): monitors the health and status of
+#   Arkime clusters. When enabled it's served at /parliament/.
+#
+# Both run from the Malcolm Arkime image (with ARKIME_CONT3XT / ARKIME_PARLIAMENT set),
+#   share Arkime's users database and are put behind Malcolm authentication by the
+#   nginx-proxy, which enables the routes from CONT3XT_DISABLED / PARLIAMENT_DISABLED in
+#   the arkime-env ConfigMap.
+# NOTE: this requires Malcolm Arkime and nginx-proxy images that include Cont3xt and
+#   Parliament support (added after Malcolm v26.10.0). With older images, set `image`
+#   below and image.nginx_container_override to builds that include it.
+#   The `cont3xt` and `parliament` Services are always created, even when disabled,
+#   because nginx-proxy images with this support declare both upstreams unconditionally
+#   and won't start if those names don't resolve.
+cont3xt:
+  enabled: false
+  # Image override; defaults to the Arkime image (image.arkime_container_override, or
+  #   <image.repository>/arkime:<appVersion>).
+  image: ""
+  # Upstream Malcolm suggests requests of cpu: "0.5", memory: "512Mi".
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  # Extra Kubernetes EnvVar / Volume / VolumeMount entries for the Cont3xt container.
+  extraEnv: []
+  extraVolumes: []
+  extraVolumeMounts: []
+
+parliament:
+  enabled: false
+  # Image override; defaults to the Arkime image (see cont3xt.image).
+  image: ""
+  # Upstream Malcolm suggests requests of cpu: "0.25", memory: "256Mi".
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  # Extra Kubernetes EnvVar / Volume / VolumeMount entries for the Parliament container.
+  extraEnv: []
+  extraVolumes: []
+  extraVolumeMounts: []
 
 pcap_live:
   enabled: false

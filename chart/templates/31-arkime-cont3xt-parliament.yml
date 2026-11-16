@@ -1,0 +1,143 @@
+{{/*
+  Arkime Cont3xt and Parliament.
+
+  Both run from the Malcolm Arkime image, which starts cont3xt.js / parliament.js
+  instead of capture/viewer/WISE when ARKIME_CONT3XT / ARKIME_PARLIAMENT is "true".
+  At startup the image generates cont3xt.ini / parliament.ini from templates: the
+  shared Arkime users database (OpenSearch), passwordSecret (arkime-secret-env),
+  nginx header authentication, and role mappings (auth-common-env). Each app waits
+  for the Arkime container to initialize the users index before starting.
+
+  The nginx-proxy exposes /cont3xt and /parliament based on CONT3XT_DISABLED and
+  PARLIAMENT_DISABLED in the arkime-env ConfigMap (arkime_configmaps.yml).
+
+  The Services are rendered even when an app is disabled: nginx-proxy images with
+  Cont3xt/Parliament support declare `upstream cont3xt` / `upstream parliament`
+  unconditionally, and nginx refuses to start if those hostnames don't resolve. A
+  Service with no backing pods costs nothing and keeps nginx happy.
+*/}}
+{{- $apps := list
+      (dict "name" "cont3xt"    "port" 3218 "flag" "ARKIME_CONT3XT"    "values" .Values.cont3xt)
+      (dict "name" "parliament" "port" 8008 "flag" "ARKIME_PARLIAMENT" "values" .Values.parliament)
+}}
+{{- $externalCert := and .Values.external_elasticsearch.enabled (not (empty .Values.external_elasticsearch.elastic_cert_name)) }}
+{{- range $app := $apps }}
+{{- $v := $app.values }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $app.name }}
+spec:
+  ports:
+    - port: {{ $app.port }}
+      protocol: TCP
+      name: http
+  selector:
+    name: {{ $app.name }}-deployment
+{{- if $v.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $app.name }}-deployment
+spec:
+  selector:
+    matchLabels:
+      name: {{ $app.name }}-deployment
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        name: {{ $app.name }}-deployment
+    spec:
+      {{- with $v.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $v.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ $app.name }}-container
+          image: "{{ $v.image | default (include "malcolm.arkime.image" (dict "root" $)) }}"
+          imagePullPolicy: "{{ $.Values.image.pullPolicy }}"
+          stdin: false
+          tty: true
+          ports:
+            - name: http
+              protocol: TCP
+              containerPort: {{ $app.port }}
+          envFrom:
+            - configMapRef:
+                name: process-env
+            - configMapRef:
+                name: ssl-env
+            - configMapRef:
+                name: opensearch-env
+            - configMapRef:
+                name: upload-common-env
+            - configMapRef:
+                name: auth-common-env
+            - configMapRef:
+                name: arkime-env
+            - secretRef:
+                name: arkime-secret-env
+          env:
+            # the arkime image runs {{ $app.name }} rather than capture/viewer/WISE
+            - name: {{ $app.flag }}
+              value: "true"
+            - name: ARKIME_PCAP_PROCESSOR
+              value: "false"
+            - name: VIEWER
+              value: "off"
+            - name: WISE
+              value: "off"
+            {{- with $v.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with $v.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          livenessProbe:
+            exec:
+              command:
+                - /usr/local/bin/container_health.sh
+            initialDelaySeconds: 120
+            periodSeconds: 60
+            timeoutSeconds: 15
+            successThreshold: 1
+            failureThreshold: 10
+          volumeMounts:
+            - mountPath: /var/local/ca-trust/configmap
+              name: var-local-catrust-volume
+            - mountPath: /var/local/curlrc/secretmap
+              name: opensearch-curlrc-secret-volume
+            {{- if $externalCert }}
+            - name: elastic-cert
+              mountPath: /usr/local/share/ca-certificates/elastic_ca.crt
+              subPath: elastic_ca.crt
+            {{- end }}
+            {{- with $v.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      terminationGracePeriodSeconds: 15
+      volumes:
+        - name: var-local-catrust-volume
+          configMap:
+            name: {{ $.Values.ca_trust_configmap_name | default "var-local-catrust" }}
+        - name: opensearch-curlrc-secret-volume
+          secret:
+            secretName: opensearch-curlrc
+        {{- if $externalCert }}
+        - name: elastic-cert
+          secret:
+            secretName: {{ $.Values.external_elasticsearch.elastic_cert_name }}
+        {{- end }}
+        {{- with $v.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+{{- end }}
+{{- end }}
